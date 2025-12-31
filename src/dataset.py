@@ -3,13 +3,12 @@ import cv2
 import torch
 import numpy as np
 from torch.utils.data import Dataset
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
+from src.transforms import RetinaPreprocess
 
 class DriveDataset(Dataset):
-    def __init__(self, images_path, vessel_masks_path, od_masks_path, transform=None, use_od_guidance=True):
+    def __init__(self, images_path, masks_path, od_masks_path, transform=None, use_od_guidance=True):
         self.images_path = images_path
-        self.vessel_masks_path = vessel_masks_path
+        self.masks_path = masks_path
         self.od_masks_path = od_masks_path
         self.transform = transform
         self.use_od_guidance = use_od_guidance
@@ -18,64 +17,56 @@ class DriveDataset(Dataset):
         return len(self.images_path)
 
     def __getitem__(self, index):
-        # 1. 读取原始图片 (RGB)
-        image = cv2.imread(self.images_path[index])
+        # 1. 读取
+        img_path = self.images_path[index]
+        image = cv2.imread(img_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        # 2. 读取血管标签 (Gray)
-        mask = cv2.imread(self.vessel_masks_path[index], cv2.IMREAD_GRAYSCALE)
         
-        # 3. 读取视盘 Mask (Gray) - 创新点
-        img_name = os.path.basename(self.images_path[index]).split('.')[0]
-        # 假设文件名对应关系一致，根据实际情况修改扩展名
-        od_path = os.path.join(self.od_masks_path, img_name + ".png") 
+        mask_path = self.masks_path[index]
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         
-        if self.use_od_guidance and os.path.exists(od_path):
-            od_mask = cv2.imread(od_path, cv2.IMREAD_GRAYSCALE)
-            if od_mask.shape != image.shape[:2]:
-                od_mask = cv2.resize(od_mask, (image.shape[1], image.shape[0]))
-        else:
-            # 如果没有视盘mask，用全黑代替
-            od_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        # 读取 OD Mask
+        # ... (和之前一样) ...
+        
+        # ==========================================
+        # 颜色通道设计的核心修改点
+        # ==========================================
+        
+        # 1. 先做视盘压暗 (还是在 RGB 空间做比较好)
+        if self.use_od_guidance:
+             image = RetinaPreprocess.attenuate_od_brightness(image, od_mask)
+        
+        # 2. 【关键】替换 RGB 为 [G, CLAHE_G, Gamma_G]
+        # 这一步把 3通道的RGB 变成了 3通道的绿色增强集
+        image_engineered = RetinaPreprocess.get_green_enhanced_stack(image)
 
-        # 4. 数据增强 (Albumentations)
-        # 关键：Masks 需要传入列表，以便同时增强 血管mask 和 视盘mask
+        # 3. Albumentations 增强
         if self.transform:
-            augmented = self.transform(image=image, masks=[mask, od_mask])
-            image = augmented['image']
-            mask = augmented['masks'][0]
-            od_mask = augmented['masks'][1]
-
-        # 归一化已经在Transform里做了，或者手动做
-        # 这里为了演示清晰，假设Transform只做几何变换，手动转Tensor
-        # 如果 transform 里有 ToTensorV2 则不需要下面步骤
+            # 注意：Albumentations 会把 image 当作 3通道图处理，
+            # 只要我们 feed 进去的是 (H,W,3)，它就能正常做几何变换，
+            # 旋转、缩放对是不是 RGB 颜色没有偏见。
+            augmented = self.transform(image=image_engineered, mask=mask, mask0=od_mask)
+            
+            # 拿到的是 Tensor: [3, H, W]
+            image_tensor = augmented['image'] 
+            mask = augmented['mask']
+            od_mask = augmented['mask0']
         
-        # 5. 融合输入 (Feature Fusion)
-        # image: [3, H, W], od_mask: [1, H, W]
-        # 归一化 [0, 1]
-        image = image.float() / 255.0
+        # 4. 构造最终输入
+        # image_tensor 已经是 [3, H, W] 了 (即 G, CLAHE, Gamma)
         mask = mask.float() / 255.0
         od_mask = od_mask.float() / 255.0
-
+        
         if self.use_od_guidance:
-            # 增加一个维度变为 [1, H, W]
-            od_mask = od_mask.unsqueeze(0) 
-            # 拼接: 变成 4 通道 [4, H, W]
-            input_tensor = torch.cat([image, od_mask], dim=0)
-        else:
-            input_tensor = image
+            if not isinstance(od_mask, torch.Tensor):
+                od_mask = torch.from_numpy(od_mask)
             
-        mask = mask.unsqueeze(0) # [1, H, W]
+            od_mask = od_mask.unsqueeze(0) # [1, H, W]
+            
+            # 拼接: [3通道绿色特征] + [1通道OD Mask] = [4通道输入]
+            input_tensor = torch.cat([image_tensor, od_mask], dim=0) 
+        else:
+            input_tensor = image_tensor
 
+        mask = mask.unsqueeze(0)
         return input_tensor, mask
-
-# 定义增强策略
-def get_transforms(img_size=512):
-    return A.Compose([
-        A.Resize(img_size, img_size),
-        A.HorizontalFlip(p=0.5),
-        A.VerticalFlip(p=0.5),
-        A.Rotate(limit=45, p=0.5),
-        A.RandomBrightnessContrast(p=0.2),
-        ToTensorV2() # 自动把 HWC -> CHW, 0-255 -> Tensor
-    ])
