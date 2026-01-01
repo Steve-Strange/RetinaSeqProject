@@ -4,6 +4,8 @@ __pycache__/
 *$py.class
 /data/*dataset
 /data/*data
+/checkpoints
+
 
 # C extensions
 *.so

@@ -18,36 +18,92 @@ class RetinaPreprocess:
 
     @staticmethod
     def harmonize_od_color(image, od_mask):
-        """视盘颜色同化：将视盘颜色拉向背景色，消除高亮干扰"""
+        """
+        【边缘光晕修复版】视盘颜色同化
+        针对问题：边缘出现黑色“甜甜圈”阴影。
+        解决方案：
+        1. 构建一个专门的“边缘光晕层 (Halo Layer)”。
+        2. 引入动态安全底板 (Dynamic Safety Floor)：
+           - 中心区域：允许压暗 (Floor = 0.8 * Original)
+           - 边缘区域：强制提亮 (Floor = 1.1 * Original)
+        3. 扩大保护范围：通过膨胀操作，确保覆盖到视盘外的暗环。
+        """
         if od_mask is None or np.max(od_mask) == 0: 
             return image
         
         image = image.astype(np.float32)
-        # 1. 采样背景色
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-        dilated_mask = cv2.dilate(od_mask, kernel, iterations=2)
-        ring_mask = cv2.subtract(dilated_mask, od_mask)
         
-        mean_bg = cv2.mean(image, mask=ring_mask)[:3]
-        mean_od = cv2.mean(image, mask=od_mask)[:3]
+        # === 1. 定义区域 (Zone Definition) ===
+        # 核心区 (Core): 需要压暗的地方
+        shrink_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (30, 30)) # 腐蚀得更多一点，只搞中心
+        core_mask = cv2.erode(od_mask, shrink_kernel, iterations=1)
         
-        # 2. 计算增益
-        epsilon = 1e-5
-        gain_r = np.clip(mean_bg[0] / (mean_od[0] + epsilon), 0.5, 1.2)
-        gain_g = np.clip(mean_bg[1] / (mean_od[1] + epsilon), 0.2, 1.1)
-        gain_b = np.clip(mean_bg[2] / (mean_od[2] + epsilon), 0.2, 1.1)
+        # 边缘区 (Edge): 需要提亮/保护的地方
+        # 逻辑：比原 Mask 再大一圈 (Dilate)，减去 核心区
+        expand_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (30, 30)) # 扩大范围
+        dilated_mask = cv2.dilate(od_mask, expand_kernel, iterations=1)
         
-        # 3. 应用平滑增益
-        gain_map = np.ones_like(image, dtype=np.float32)
-        mask_float = od_mask.astype(np.float32) / 255.0
-        mask_blurred = cv2.GaussianBlur(mask_float, (31, 31), 0)
+        # 制作边缘权重的 Mask (环形)
+        edge_mask = cv2.subtract(dilated_mask, core_mask)
         
-        gain_map[:, :, 0] = 1.0 - mask_blurred * (1.0 - gain_r)
-        gain_map[:, :, 1] = 1.0 - mask_blurred * (1.0 - gain_g)
-        gain_map[:, :, 2] = 1.0 - mask_blurred * (1.0 - gain_b)
+        # 柔化 Mask
+        mask_float = core_mask.astype(np.float32) / 255.0
+        mask_blurred = cv2.GaussianBlur(mask_float, (51, 51), 0)
+        mask_blurred = np.expand_dims(mask_blurred, axis=2)
         
-        return np.clip(image * gain_map, 0, 255).astype(np.uint8)
+        # 柔化边缘权重图
+        edge_float = edge_mask.astype(np.float32) / 255.0
+        edge_blurred = cv2.GaussianBlur(edge_float, (41, 41), 0)
+        edge_blurred = np.expand_dims(edge_blurred, axis=2)
 
+        # === 2. 采样与计算比率 ===
+        # 背景采样区 (在膨胀区之外)
+        bg_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        bg_zone = cv2.bitwise_not(cv2.dilate(dilated_mask, bg_kernel, iterations=2))
+        
+        mean_bg = cv2.mean(image, mask=bg_zone)[:3]
+        mean_od = cv2.mean(image, mask=core_mask)[:3]
+        
+        corrected = np.copy(image)
+        epsilon = 1e-5
+
+        # === 3. 通道处理 (同前，但更温和) ===
+        
+        # R 通道: 提亮保红
+        ratio_r = mean_bg[0] / (mean_od[0] + epsilon)
+        ratio_r = np.clip(ratio_r, 1.05, 1.3) # 稍微激进一点提亮 R
+        corrected[:, :, 0] *= ratio_r
+        
+        # G/B 通道: 压暗
+        for ch in [1, 2]:
+            raw_ratio = mean_bg[ch] / (mean_od[ch] + epsilon)
+            target_ratio = np.clip(raw_ratio * 1.4, 0.75, 1.05) # 下限提到 0.75
+            
+            channel_data = image[:, :, ch]
+            norm_data = channel_data / 255.0
+            attenuation = 1.0 - (norm_data * (1.0 - target_ratio))
+            corrected[:, :, ch] *= attenuation
+
+        # === 4. 融合与动态兜底 (关键修改) ===
+        
+        # 初步融合
+        harmonized = image * (1 - mask_blurred) + corrected * mask_blurred
+        
+        # 【动态安全底板】
+        # 逻辑：如果像素在边缘区(edge_blurred高)，底板就是 image * 1.1 (提亮)
+        #       如果像素在其他区，底板就是 image * 0.85 (允许压暗)
+        
+        # floor_factor 从 0.85 平滑过渡到 1.15
+        # 边缘越强，factor 越大
+        floor_factor = 0.85 + (edge_blurred * 0.3) 
+        
+        safety_floor = image * floor_factor
+        
+        # 取最大值：这就保证了边缘绝对不会黑，反而会被 edge_blurred 撑起来
+        final_result = np.maximum(harmonized, safety_floor)
+        
+        return np.clip(final_result, 0, 255).astype(np.uint8)
+    
     @staticmethod
     def get_green_enhanced_stack(image):
         """生成特征栈: [Green, CLAHE, TopHat]"""
