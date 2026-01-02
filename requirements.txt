@@ -1,0 +1,19 @@
+# 核心深度学习框架
+torch==2.5.1
+torchvision==0.20.1
+
+# 基础数据处理与图像库
+numpy==2.3.5
+opencv-python
+tqdm==4.67.1
+imageio
+matplotlib
+scikit-learn
+scikit-image
+
+# 数据增强
+albumentations==2.0.8
+
+# Hugging Face 模型库 (用于 SegFormer)
+transformers
+accelerate

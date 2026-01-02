@@ -1,102 +1,93 @@
 import os
-import cv2
+import argparse
 import glob
-import gzip
+import cv2
 import numpy as np
 from tqdm import tqdm
-from PIL import Image
+import albumentations as A
+from src.utils import create_dir
+from src.transforms import ODGenerator, RetinaPreprocess
+import torch
 
-# === 配置 ===
-OUTPUT_DIR = "./data/unified_data"
-IMG_SIZE = 512
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_path", type=str, default="data/DRIVE", help="原始数据路径")
+    parser.add_argument("--output_path", type=str, default="output/processed_data", help="输出路径")
+    parser.add_argument("--img_size", type=int, default=512)
+    parser.add_argument("--augment_times", type=int, default=5, help="每张图增强多少倍")
+    return parser.parse_args()
 
-# 请修改为你本地的实际路径
-PATH_DRIVE_TRAIN = "./data/DRIVE/training"
-PATH_DRIVE_TEST  = "./data/DRIVE/test"
-PATH_STARE       = "./data/STARE"
-PATH_CHASE       = "./data/CHASE_DB"
-# ============
+def get_transforms(size):
+    return A.Compose([
+        A.Resize(size, size),
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
+        A.RandomRotate90(p=0.5),
+        A.Affine(scale=(0.95, 1.05), rotate=(-10, 10), shear=(-2, 2), p=0.8),
+        A.Perspective(scale=(0.01, 0.02), keep_size=True, p=0.3),
+        A.OneOf([
+            A.RandomBrightnessContrast(p=0.5),
+            A.RandomGamma(p=0.5),
+        ], p=0.3),
+    ], additional_targets={'mask0': 'mask'}) # mask0 用于 OD Mask
 
-def make_dirs():
-    os.makedirs(os.path.join(OUTPUT_DIR, "images"), exist_ok=True)
-    os.makedirs(os.path.join(OUTPUT_DIR, "masks"), exist_ok=True)
-
-def save_data(image, mask, prefix, filename):
-    if image is None or mask is None: return
+def process_set(subset, args, od_gen):
+    print(f"Processing {subset} set...")
+    img_dir = os.path.join(args.data_path, subset, "images")
+    mask_dir = os.path.join(args.data_path, subset, "1st_manual")
     
-    # Resize
-    image = cv2.resize(image, (IMG_SIZE, IMG_SIZE))
-    mask = cv2.resize(mask, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_NEAREST)
-    if len(mask.shape) == 3: mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+    save_img_dir = os.path.join(args.output_path, subset, "image")
+    save_mask_dir = os.path.join(args.output_path, subset, "mask")
+    save_od_dir = os.path.join(args.output_path, subset, "od_mask")
     
-    # 二值化 Mask (确保只有0和255)
-    _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+    for d in [save_img_dir, save_mask_dir, save_od_dir]:
+        create_dir(d)
 
-    base_name = filename.split('.')[0]
-    new_name = f"{prefix}_{base_name}.png"
+    img_paths = sorted(glob.glob(os.path.join(img_dir, "*.tif")) + glob.glob(os.path.join(img_dir, "*.png")))
+    mask_paths = sorted(glob.glob(os.path.join(mask_dir, "*.gif")) + glob.glob(os.path.join(mask_dir, "*.png")))
 
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "images", new_name), image)
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "masks", new_name), mask)
+    transform = get_transforms(args.img_size)
 
-def load_gz_image(path, is_mask=False):
-    try:
-        with gzip.open(path, 'rb') as f:
-            pil_img = Image.open(f)
-            pil_img.load()
-            if is_mask: return np.array(pil_img.convert('L'))
-            else: return cv2.cvtColor(np.array(pil_img.convert('RGB')), cv2.COLOR_RGB2BGR)
-    except: return None
+    for img_p, mask_p in tqdm(zip(img_paths, mask_paths), total=len(img_paths)):
+        name = os.path.basename(img_p).split(".")[0]
+        
+        # 1. 读图
+        image = cv2.imread(img_p)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        # 2. 读/生成 OD Mask
+        # 这里实时生成，也可以先生成好保存
+        od_mask = od_gen.get_mask(image)
+        
+        # 3. 读 Label Mask
+        import imageio
+        mask = imageio.mimread(mask_p)[0] if mask_p.endswith('.gif') else cv2.imread(mask_p, 0)
+        
+        # 4. 特征工程 (Green+CLAHE+TopHat)
+        image_harmonized = RetinaPreprocess.harmonize_od_color(image, od_mask)
+        image_engineered = RetinaPreprocess.get_green_enhanced_stack(image_harmonized) # (H, W, 3)
 
-def process_all():
-    make_dirs()
-    
-    # 1. DRIVE
-    for subset in [PATH_DRIVE_TRAIN, PATH_DRIVE_TEST]:
-        if not os.path.exists(subset): continue
-        print(f"处理 DRIVE: {subset}")
-        img_list = glob.glob(os.path.join(subset, "images", "*.tif"))
-        for p in tqdm(img_list):
-            img = cv2.imread(p)
-            fname = os.path.basename(p)
-            img_id = fname.split('_')[0]
-            mask_path = os.path.join(subset, "1st_manual", f"{img_id}_manual1.gif")
-            if not os.path.exists(mask_path): # 尝试找 .png
-                 mask_path = mask_path.replace(".gif", ".png")
-            if os.path.exists(mask_path):
-                mask = np.array(Image.open(mask_path).convert('L'))
-                save_data(img, mask, "drive", fname)
-
-    # 2. STARE (支持 .gz)
-    if os.path.exists(PATH_STARE):
-        print("处理 STARE...")
-        gz_files = glob.glob(os.path.join(PATH_STARE, "stare-images", "*.gz"))
-        for p in tqdm(gz_files):
-            img = load_gz_image(p)
-            fname = os.path.basename(p)
-            base_id = fname.split('.')[0]
-            mask_path = os.path.join(PATH_STARE, "labels-ah", f"{base_id}.ah.ppm.gz")
-            if os.path.exists(mask_path):
-                mask = load_gz_image(mask_path, is_mask=True)
-                save_data(img, mask, "stare", base_id)
-
-    # 3. CHASE_DB
-    if os.path.exists(PATH_CHASE):
-        print("处理 CHASE_DB...")
-        img_list = glob.glob(os.path.join(PATH_CHASE, "img", "*.jpg")) + glob.glob(os.path.join(PATH_CHASE, "images", "*.png"))
-        for p in tqdm(img_list):
-            img = cv2.imread(p)
-            fname = os.path.basename(p)
-            base = os.path.splitext(fname)[0]
-            # 尝试匹配 mask
-            candidates = [f"{base}_1stHO.png", f"{base}_1stHO.jpg", f"{base}.png"]
-            mask = None
-            for c in candidates:
-                mp = os.path.join(PATH_CHASE, "Masks", c)
-                if os.path.exists(mp):
-                    mask = cv2.imread(mp, cv2.IMREAD_GRAYSCALE)
-                    break
-            save_data(img, mask, "chase", fname)
+        # 5. 增强循环
+        # 测试集通常只 Resize 不增强，这里简单处理：如果是 test 且 augment_times > 0，也可以增强
+        # 或者在代码里控制：训练集增强，测试集仅 Resize
+        times = args.augment_times if subset == "training" else 1
+        
+        for i in range(times):
+            # 如果是测试集且不需要增强，需要一个新的 transform 只做 Resize
+            if subset == "test":
+                aug = A.Compose([A.Resize(args.img_size, args.img_size)], additional_targets={'mask0': 'mask'})(image=image_engineered, mask=mask, mask0=od_mask)
+            else:
+                aug = transform(image=image_engineered, mask=mask, mask0=od_mask)
+            
+            # 保存 (image_engineered 是 3通道，可以直接 imwrite，无需转 BGR，因为它是特征图)
+            cv2.imwrite(os.path.join(save_img_dir, f"{name}_{i}.png"), aug['image'])
+            cv2.imwrite(os.path.join(save_mask_dir, f"{name}_{i}.png"), aug['mask'])
+            cv2.imwrite(os.path.join(save_od_dir, f"{name}_{i}.png"), aug['mask0'])
 
 if __name__ == "__main__":
-    process_all()
-    print("数据统一完成！")
+    args = get_args()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    od_gen = ODGenerator(device)
+    
+    process_set("training", args, od_gen)
+    process_set("test", args, od_gen)

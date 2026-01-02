@@ -1,62 +1,44 @@
-import os
-import cv2
 import torch
 import numpy as np
+import cv2
+import os
 from torch.utils.data import Dataset
 
-class SimpleDataset(Dataset):
-    """
-    专门读取 'final_augmented_dataset' 的数据集类。
-    因为数据已经是特征图（Feature Stack）且做过几何变换，
-    这里只负责：读取、归一化、拼接视盘Mask。
-    """
-    def __init__(self, images_path, masks_path, od_masks_path, use_od_guidance=True):
+class DriveDataset(Dataset):
+    def __init__(self, images_path, masks_path, od_masks_path=None, use_od_input=False):
         self.images_path = images_path
         self.masks_path = masks_path
         self.od_masks_path = od_masks_path
-        self.use_od_guidance = use_od_guidance
-
-    def __len__(self):
-        return len(self.images_path)
+        self.use_od_input = use_od_input
+        self.n_samples = len(images_path)
 
     def __getitem__(self, index):
-        # 1. 读取 Feature Stack (看起来像RGB的特征图)
-        # OpenCV 读取顺序是 BGR。只要我们生成和读取都用 OpenCV，通道顺序就是一致的，不需要转 RGB
-        img_path = self.images_path[index]
-        image = cv2.imread(img_path) # Shape: [512, 512, 3]
+        # 1. 图像 (假设已经是增强后的 Feature Stack 或 RGB，形状 HxWx3)
+        image = cv2.imread(self.images_path[index], cv2.IMREAD_COLOR) 
+        # cv2 读取默认为 BGR，如果是特征图，顺序由预处理决定，保持原样即可
+        # 如果是 RGB 训练，建议转 RGB: cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
-        # 2. 读取 血管 Mask
-        # 根据文件名找对应的 mask
-        fname = os.path.basename(img_path)
-        mask_path = os.path.join(self.masks_path, fname)
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        image = image / 255.0
         
-        # 3. 读取 OD Mask
-        od_p = os.path.join(self.od_masks_path, fname)
-        if os.path.exists(od_p):
-            od_mask = cv2.imread(od_p, cv2.IMREAD_GRAYSCALE)
-        else:
-            # 兜底：如果没有OD mask，给一个全黑的
-            od_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        # 2. 视盘 Mask (如果配置要求输入)
+        if self.use_od_input and self.od_masks_path:
+            od_mask = cv2.imread(self.od_masks_path[index], cv2.IMREAD_GRAYSCALE)
+            od_mask = od_mask / 255.0
+            od_mask = np.expand_dims(od_mask, axis=-1) # (H, W, 1)
+            # Concatenate -> (H, W, 4)
+            image = np.concatenate([image, od_mask], axis=-1)
+        
+        # Transpose (H, W, C) -> (C, H, W)
+        image = np.transpose(image, (2, 0, 1)).astype(np.float32)
+        image = torch.from_numpy(image)
 
-        # 4. 归一化 (0-255 -> 0.0-1.0)
-        image = image.astype(np.float32) / 255.0
-        mask = mask.astype(np.float32) / 255.0
-        od_mask = od_mask.astype(np.float32) / 255.0
-        
-        # 5. 转 Tensor (HWC -> CHW)
-        # image: [3, 512, 512]
-        image = torch.from_numpy(image).permute(2, 0, 1)
-        # mask: [1, 512, 512]
-        mask = torch.from_numpy(mask).unsqueeze(0)
-        # od_mask: [1, 512, 512]
-        od_mask = torch.from_numpy(od_mask).unsqueeze(0)
-        
-        # 6. 核心创新点：拼接 OD Mask
-        if self.use_od_guidance:
-            # 拼接后变成 [4, 512, 512]
-            input_tensor = torch.cat([image, od_mask], dim=0) 
-        else:
-            input_tensor = image
+        # 3. 标签 Mask
+        mask = cv2.imread(self.masks_path[index], cv2.IMREAD_GRAYSCALE)
+        mask = mask / 255.0
+        mask = np.expand_dims(mask, axis=0).astype(np.float32)
+        mask = torch.from_numpy(mask)
 
-        return input_tensor, mask
+        return image, mask
+
+    def __len__(self):
+        return self.n_samples

@@ -1,44 +1,42 @@
+import os
+import random
+import numpy as np
 import torch
-import torch.nn as nn
+from sklearn.metrics import confusion_matrix
 
-class DiceBCELoss(nn.Module):
-    def __init__(self, smooth=1e-6):
-        super().__init__()
-        self.smooth = smooth
-        self.bce = nn.BCEWithLogitsLoss()
+def create_dir(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
 
-    def forward(self, inputs, targets):
-        # BCE Part
-        bce = self.bce(inputs, targets)
-        
-        # Dice Part
-        inputs = torch.sigmoid(inputs)
-        # Flatten
-        inputs = inputs.view(-1)
-        targets = targets.view(-1)
-        
-        intersection = (inputs * targets).sum()
-        dice = (2. * intersection + self.smooth) / (inputs.sum() + targets.sum() + self.smooth)
-        
-        return bce + (1 - dice)
+def seeding(seed):
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
 
-def calculate_metrics(pred, target, threshold=0.5):
-    """计算常用的医学分割指标"""
-    # pred是logits，先sigmoid再二值化
-    pred = (torch.sigmoid(pred) > threshold).float()
-    target = target.float()
+def epoch_time(start_time, end_time):
+    elapsed_time = end_time - start_time
+    elapsed_mins = int(elapsed_time / 60)
+    elapsed_secs = int(elapsed_time - (elapsed_mins * 60))
+    return elapsed_mins, elapsed_secs
+
+def calculate_metrics(y_true, y_pred):
+    """ 计算 Jaccard, F1, Recall, Precision, Accuracy, Specificity """
+    y_true = y_true.cpu().numpy() > 0.5
+    y_true = y_true.astype(np.uint8).reshape(-1)
     
-    tp = (pred * target).sum()
-    tn = ((1 - pred) * (1 - target)).sum()
-    fp = (pred * (1 - target)).sum()
-    fn = ((1 - pred) * target).sum()
-    
-    epsilon = 1e-7
-    
-    iou = tp / (tp + fp + fn + epsilon)
-    dice = 2 * tp / (2 * tp + fp + fn + epsilon)
-    acc = (tp + tn) / (tp + tn + fp + fn + epsilon)
-    sensitivity = tp / (tp + fn + epsilon) # 召回率
-    specificity = tn / (tn + fp + epsilon) # 特异性
-    
-    return iou.item(), dice.item(), acc.item(), sensitivity.item(), specificity.item()
+    y_pred = y_pred.cpu().numpy() > 0.5
+    y_pred = y_pred.astype(np.uint8).reshape(-1)
+
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+
+    score_f1 = 2 * tp / (2 * tp + fp + fn + 1e-6)
+    score_jaccard = tp / (tp + fp + fn + 1e-6)
+    score_recall = tp / (tp + fn + 1e-6)
+    score_specificity = tn / (tn + fp + 1e-6)
+    score_precision = tp / (tp + fp + 1e-6)
+    score_acc = (tp + tn) / (tp + tn + fp + fn + 1e-6)
+
+    return [score_jaccard, score_f1, score_recall, score_precision, score_acc, score_specificity]
