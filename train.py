@@ -35,9 +35,9 @@ def get_args():
                         help="选择模型架构")
     
     # === 训练超参数 ===
-    parser.add_argument("--batch_size", type=int, default=48, help="Batch Size")
-    parser.add_argument("--epochs", type=int, default=50, help="训练轮数")
-    parser.add_argument("--lr", type=float, default=1e-4, help="学习率")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch Size")
+    parser.add_argument("--epochs", type=int, default=100, help="训练轮数")
+    parser.add_argument("--lr", type=float, default=1e-3, help="学习率")
     parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程")
     
     # === 功能开关 ===

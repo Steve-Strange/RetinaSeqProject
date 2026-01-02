@@ -11,7 +11,7 @@ python generate_final_dataset.py
 
 python visualize_augmentations.py
 
-
+### 模型训练
 
 python train.py --model_arch custom --no_od --batch_size 64
 

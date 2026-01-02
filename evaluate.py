@@ -4,10 +4,9 @@ import torch
 import numpy as np
 import glob
 import pandas as pd
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 import segmentation_models_pytorch as smp
-import traceback  # 用于打印详细错误
+import traceback
 
 # 引入你的自定义模块
 from src.model import UNet as CustomUNet
@@ -29,8 +28,60 @@ ARCH_MAP = {
     "transunet": "transunet"
 }
 
+def save_comparison_row(save_path, original_rgb, gt_mask, pred_binary, dice_score):
+    """
+    生成横向对比图：[原图 | 真值 | 预测 | 差异图]
+    """
+    # 1. 准备各个分量 (统一转为 BGR 3通道，方便 OpenCV 拼接)
+    
+    # A. 原图 (RGB -> BGR)
+    vis_orig = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2BGR)
+    
+    # B. 真值 (Gray -> BGR)
+    vis_gt = cv2.cvtColor(gt_mask, cv2.COLOR_GRAY2BGR)
+    
+    # C. 预测 (Gray -> BGR)
+    vis_pred = cv2.cvtColor(pred_binary, cv2.COLOR_GRAY2BGR)
+    
+    # D. 差异图 (Diff Map)
+    vis_diff = np.zeros_like(vis_orig)
+    
+    # TP (白色): 预测对的
+    vis_diff[(pred_binary==255) & (gt_mask==255)] = [255, 255, 255]
+    # FP (蓝色): 误检 (OpenCV BGR: 255, 0, 0)
+    vis_diff[(pred_binary==255) & (gt_mask==0)] = [255, 0, 0]
+    # FN (红色): 漏检 (OpenCV BGR: 0, 0, 255)
+    vis_diff[(pred_binary==0) & (gt_mask==255)] = [0, 0, 255]
+
+    # --- 添加文字标题 ---
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.8
+    thick = 2
+    color = (200, 255, 200) # 淡绿色文字，对比度高
+    pos = (20, 40)
+
+    cv2.putText(vis_orig, "Original", pos, font, scale, color, thick)
+    cv2.putText(vis_gt,   "Ground Truth", pos, font, scale, color, thick)
+    cv2.putText(vis_pred, f"Pred (Dice:{dice_score:.2f})", pos, font, scale, color, thick)
+    # 差异图文字做小一点
+    cv2.putText(vis_diff, "Diff (B:FP, R:FN)", (10, 40), font, 0.7, color, thick)
+
+    # 2. 横向拼接
+    # 在图片之间加一条细白线，方便区分
+    separator = np.ones((vis_orig.shape[0], 5, 3), dtype=np.uint8) * 128
+    
+    combined_row = np.hstack([
+        vis_orig, separator, 
+        vis_gt, separator, 
+        vis_pred, separator, 
+        vis_diff
+    ])
+    
+    # 3. 保存
+    cv2.imwrite(save_path, combined_row)
+
 def load_model(model_path):
-    """智能加载模型：根据文件名推断架构和通道数"""
+    """智能加载模型"""
     fname = os.path.basename(model_path)
     
     # 1. 推断架构
@@ -40,7 +91,6 @@ def load_model(model_path):
             arch = value
             break
     
-    # 【修复】针对旧版 best_model.pth 的特殊处理
     if arch is None:
         if "best_model.pth" in fname:
             print(f"⚠️ 识别到旧版默认文件名 {fname}，强制指定架构为 'custom'")
@@ -50,12 +100,9 @@ def load_model(model_path):
             arch = "resnet34"
         
     # 2. 推断通道数 (OD Guidance)
-    # 逻辑：只要文件名里没有 explicit 说 "od0" 或 "no_od"，默认就是 OD Guidance (4通道)
     use_od = True 
     if "od0" in fname or "no_od" in fname:
         use_od = False
-    
-    # 【修复】旧版 best_model.pth 默认是开启 OD 的 (4通道)
     if fname == "best_model.pth":
         use_od = True
 
@@ -69,7 +116,6 @@ def load_model(model_path):
         from src.model_transunet import TransUNet
         model = TransUNet(img_size=512, in_channels=in_channels, out_channels=1)
     else:
-        # SMP 模型
         model = smp.Unet(
             encoder_name=arch,        
             encoder_weights=None, 
@@ -79,21 +125,16 @@ def load_model(model_path):
         )
         
     # 4. 加载权重
-    # weights_only=False 是为了兼容旧版pytorch保存习惯，虽有警告但对本地文件是安全的
     state_dict = torch.load(model_path, map_location=DEVICE, weights_only=False)
-    
-    # 处理 DataParallel 的 module. 前缀
     new_state_dict = {}
     for k, v in state_dict.items():
         name = k.replace("module.", "")
         new_state_dict[name] = v
         
-    # 尝试加载权重
     try:
         model.load_state_dict(new_state_dict)
     except RuntimeError as e:
-        print(f"❌ 权重加载失败！架构不匹配。尝试修正架构猜测...")
-        # 简单的自动纠错：如果 Custom 失败，试试 ResNet，反之亦然 (可选，这里先只报错误)
+        print(f"❌ 权重加载失败！架构不匹配。")
         raise e
     
     model.to(DEVICE)
@@ -155,20 +196,18 @@ def evaluate_single_model(model_path):
             
             logits = model(input_tensor)
             
+            # 计算指标
             scores = calculate_metrics(logits, gt_tensor)
             metrics.append(scores) 
+            dice_score = scores[1]
             
-            # 可视化
+            # 可视化准备
             pred_prob = torch.sigmoid(logits).squeeze().cpu().numpy()
             pred_binary = (pred_prob > 0.5).astype(np.uint8) * 255
             
-            diff_map = np.zeros_like(rgb)
-            diff_map[(pred_binary==255) & (gt==255)] = [255, 255, 255] 
-            diff_map[(pred_binary==255) & (gt==0)] = [0, 0, 255] 
-            diff_map[(pred_binary==0) & (gt==255)] = [255, 0, 0] 
-            diff_map = cv2.cvtColor(diff_map, cv2.COLOR_RGB2BGR)
-            
-            cv2.imwrite(os.path.join(save_vis_dir, f"vis_{fname}"), diff_map)
+            # 调用新的横向可视化函数
+            save_path = os.path.join(save_vis_dir, f"vis_{fname}")
+            save_comparison_row(save_path, rgb, gt, pred_binary, dice_score)
             
     avg_scores = np.mean(metrics, axis=0)
     return {
@@ -191,19 +230,15 @@ def main():
     all_results = []
     
     for pth in model_files:
-        # 【修复】增加 Try-Except 块，防止单个模型错误中断整个流程
         try:
             res = evaluate_single_model(pth)
             all_results.append(res)
         except Exception as e:
             print(f"\n❌ 模型 {os.path.basename(pth)} 评估失败，跳过。")
             print(f"错误信息: {str(e)}")
-            # 打印简略堆栈，方便调试
-            # traceback.print_exc()
             continue
         
     if not all_results:
-        print("没有模型成功完成评估。")
         return
 
     df = pd.DataFrame(all_results)
