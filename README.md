@@ -13,10 +13,8 @@ python visualize_augmentations.py
 
 ### 模型训练
 
-python train.py --model_arch custom --no_od --batch_size 64
+python main.py
 
-python train.py --model_arch resnet34 --batch_size 64
+### 模型参数
 
-python train.py --model_arch efficientnet-b4 --batch_size 48
-
-pkill -9 python
+src/config.py

@@ -14,13 +14,12 @@ class FocalTverskyLoss(nn.Module):
         inputs = torch.sigmoid(inputs)
         inputs = inputs.view(-1)
         targets = targets.view(-1)
-        
         TP = (inputs * targets).sum()
         FP = ((1 - targets) * inputs).sum()
         FN = (targets * (1 - inputs)).sum()
-        
         tversky = (TP + self.smooth) / (TP + self.alpha * FP + self.beta * FN + self.smooth)
-        return torch.pow((1 - tversky), self.gamma)
+        loss = torch.pow((1 - tversky), self.gamma)
+        return loss
 
 class BoundaryLoss(nn.Module):
     def __init__(self):
@@ -30,9 +29,10 @@ class BoundaryLoss(nn.Module):
         inputs = torch.sigmoid(inputs)
         
         def get_boundary(x):
-            # 简单的Sobel边缘检测
-            sobel_x = torch.tensor([[1, 0, -1], [2, 0, -2], [1, 0, -1]], device=x.device).float().view(1, 1, 3, 3)
-            sobel_y = sobel_x.transpose(2, 3)
+            sobel_x = torch.tensor([[1, 0, -1], [2, 0, -2], [1, 0, -1]], device=x.device).float()
+            sobel_y = sobel_x.t()
+            sobel_x = sobel_x.view(1, 1, 3, 3)
+            sobel_y = sobel_y.view(1, 1, 3, 3)
             grad_x = F.conv2d(x, sobel_x, padding=1)
             grad_y = F.conv2d(x, sobel_y, padding=1)
             return torch.sqrt(grad_x ** 2 + grad_y ** 2 + 1e-6)
@@ -46,8 +46,10 @@ class VesselSegmentationLoss(nn.Module):
         super(VesselSegmentationLoss, self).__init__()
         self.tversky = FocalTverskyLoss()
         self.boundary = BoundaryLoss()
-        self.w_t = w_tversky
-        self.w_b = w_boundary
+        self.w_tversky = w_tversky
+        self.w_boundary = w_boundary
 
     def forward(self, inputs, targets):
-        return self.w_t * self.tversky(inputs, targets) + self.w_b * self.boundary(inputs, targets)
+        loss_t = self.tversky(inputs, targets)
+        loss_b = self.boundary(inputs, targets)
+        return self.w_tversky * loss_t + self.w_boundary * loss_b

@@ -2,9 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ... (在此处粘贴 FocalModulation, FocalModulationContextAggregation, VisionMambaInspired 类) ...
-# 为了节省篇幅，这里假设上述类已经包含，仅展示核心整合部分
-
 class FocalModulation(nn.Module):
     def __init__(self, in_channels, gamma=2.0, alpha=0.25):
         super(FocalModulation, self).__init__()
@@ -70,6 +67,7 @@ class VisionMambaInspired(nn.Module):
         x_perm = x.permute(0, 2, 3, 1)
         x_norm = self.norm1(x_perm).permute(0, 3, 1, 2)
         x_tm = self.token_mixer(x_norm) + shortcut
+        
         shortcut = x_tm
         x_perm = x_tm.permute(0, 2, 3, 1)
         x_norm = self.norm2(x_perm)
@@ -145,9 +143,9 @@ class ConvBlock(nn.Module):
         out = self.leaky_relu(out)
         return out
 
-class LFANet(nn.Module):
+class build_unet(nn.Module):
     def __init__(self, input_channels=3, num_classes=1, feature_scale=2, dropout=0.5):
-        super(LFANet, self).__init__()
+        super(build_unet, self).__init__()
         filters = [int(x / feature_scale) for x in [16, 32, 64]]
         
         self.conv1 = ConvBlock(input_channels, filters[0], dropout)
@@ -196,17 +194,20 @@ class LFANet(nn.Module):
         att1 = self.att1(lfa)
         fused = torch.cat([att1, lfa], dim=1)
         d1 = self.up1(fused)
-        if d1.size() != c2.size(): d1 = F.interpolate(d1, size=c2.shape[2:], mode='bilinear', align_corners=True)
+        if d1.size() != c2.size():
+             d1 = F.interpolate(d1, size=c2.shape[2:], mode='bilinear', align_corners=True)
         att2 = self.att2(c2)
         d1 = torch.cat([att2, d1], dim=1)
         d1 = self.relu1(self.dec_conv1(d1))
         d2 = self.up2(d1)
-        if d2.size() != c1.size(): d2 = F.interpolate(d2, size=c1.shape[2:], mode='bilinear', align_corners=True)
+        if d2.size() != c1.size():
+             d2 = F.interpolate(d2, size=c1.shape[2:], mode='bilinear', align_corners=True)
         att3 = self.att3(c1)
         d2 = torch.cat([att3, d2], dim=1)
         d2 = self.relu2(self.dec_conv2(d2))
         d3 = self.up3(d2)
-        if d3.size() != x.size(): d3 = F.interpolate(d3, size=x.shape[2:], mode='bilinear', align_corners=True)
+        if d3.size() != x.size():
+             d3 = F.interpolate(d3, size=x.shape[2:], mode='bilinear', align_corners=True)
         d3 = self.relu3(self.dec_conv3(d3))
         out = self.final(d3)
         return out
