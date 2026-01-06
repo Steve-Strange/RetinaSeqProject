@@ -198,23 +198,22 @@ def run_comparative_test(dataset_name):
         # 2. OD Mask (新增)
         col2 = add_label(mask_to_bgr(od_mask), "OD Mask")
         
-        # 6. 真值
-        col3 = add_label(mask_to_bgr(mask_gt), "GT")
-        
         # 3. Baseline 误差
-        col4 = add_label(draw_error_map((mask_gt>127), pred_base_np), "Results")
+        col3 = add_label(draw_error_map((mask_gt>127), pred_base_np), "Base Error")
         
-        # # 4. 处理后的图
-        # col5 = add_label(img_opt, "Processed")
+        # 4. 处理后的图
+        col4 = add_label(img_opt, "Processed")
         
-        # # 5. Optimized 误差
-        # col6 = add_label(draw_error_map((mask_gt>127), pred_opt_np), "Opt Error")
-
+        # 5. Optimized 误差
+        col5 = add_label(draw_error_map((mask_gt>127), pred_opt_np), "Opt Error")
+        
+        # 6. 真值
+        col6 = add_label(mask_to_bgr(mask_gt), "GT")
 
         h = col1.shape[0]
         sep = np.ones((h, 5, 3), dtype=np.uint8) * 100
         
-        final_row = np.concatenate([col1, sep, col2, sep, col3, sep, col4], axis=1)
+        final_row = np.concatenate([col1, sep, col2, sep, col3, sep, col4, sep, col5, sep, col6], axis=1)
         
         cv2.imwrite(os.path.join(save_path, f"{name}.png"), final_row)
 
