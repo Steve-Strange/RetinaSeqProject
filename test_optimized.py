@@ -201,11 +201,11 @@ def run_comparative_test(dataset_name):
         # 3. Baseline 误差
         col3 = add_label(draw_error_map((mask_gt>127), pred_base_np), "Base Error")
         
-        # 4. 处理后的图
-        col4 = add_label(img_opt, "Processed")
+        # # 4. 处理后的图
+        # col4 = add_label(img_opt, "Processed")
         
-        # 5. Optimized 误差
-        col5 = add_label(draw_error_map((mask_gt>127), pred_opt_np), "Opt Error")
+        # # 5. Optimized 误差
+        # col5 = add_label(draw_error_map((mask_gt>127), pred_opt_np), "Opt Error")
         
         # 6. 真值
         col6 = add_label(mask_to_bgr(mask_gt), "GT")
@@ -213,7 +213,7 @@ def run_comparative_test(dataset_name):
         h = col1.shape[0]
         sep = np.ones((h, 5, 3), dtype=np.uint8) * 100
         
-        final_row = np.concatenate([col1, sep, col2, sep, col3, sep, col4, sep, col5, sep, col6], axis=1)
+        final_row = np.concatenate([col1, sep, col2, sep, col6, sep, col3], axis=1)
         
         cv2.imwrite(os.path.join(save_path, f"{name}.png"), final_row)
 
@@ -223,14 +223,21 @@ def run_comparative_test(dataset_name):
         print(f"--- {name} ---")
         print(f"IoU (Jaccard): {m[0]/count:.4f}")
         print(f"F1 (Dice)    : {m[1]/count:.4f}")
+        print(f"Sensitivity  : {m[2]/count:.4f}")
+        print(f"Precision    : {m[3]/count:.4f}")
         print(f"Accuracy     : {m[4]/count:.4f}")
+        print(f"Specificity  : {m[5]/count:.4f}")
 
     print(f"\n>>> [{dataset_name}] RESULTS <<<")
     print_res("Baseline", metrics_base)
     print_res("Optimized", metrics_opt)
-    
+
     diff_iou = (metrics_opt[0] - metrics_base[0]) / count
-    print(f"\nIoU Change: {diff_iou:+.4f}")
+    diff_sens = (metrics_opt[2] - metrics_base[2]) / count
+    diff_prec = (metrics_opt[3] - metrics_base[3]) / count
+    print(f"\nIoU Change        : {diff_iou:+.4f}")
+    print(f"Sensitivity Change: {diff_sens:+.4f}")
+    print(f"Precision Change  : {diff_prec:+.4f}")
     print(f"Images saved to: {save_path}\n")
 
 if __name__ == "__main__":
