@@ -1,14 +1,15 @@
+"""
+配置文件
+包含：路径配置、数据集配置、训练超参数
+"""
 import os
-
-# === 硬件设置 ===
-# 注意：这里删除了 os.environ["CUDA_VISIBLE_DEVICES"]
-# 显卡分配将在 main.py 中通过多进程动态指定
 
 # === 路径配置 ===
 DATA_ROOT = "data"
 PROCESSED_DATA_ROOT = "working/new_data"
 CHECKPOINT_DIR = "working/checkpoints"
 RESULT_DIR = "working/results"
+LOG_DIR = "working/logs"
 
 # === 数据集配置 ===
 DATASET_CONFIG = {
